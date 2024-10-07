@@ -1,0 +1,177 @@
+import ccxt
+import re
+from telethon import TelegramClient, events
+
+# API keys for OKX exchange
+API_KEY = 'API_KEY'
+SECRET_KEY = 'SECRET_KEY'
+PASSPHRASE = 'PASSPHRASE'
+
+# Initialize OKX exchange (futures account)
+okx = ccxt.okx({
+    'apiKey': API_KEY,
+    'secret': SECRET_KEY,
+    'password': PASSPHRASE,
+    'options': {'defaultType': 'swap'},  # Set to 'future' or 'spot' as needed
+})
+
+# Telegram API configuration
+api_id = 'api_id'  # Your API ID
+api_hash = 'api_hash'  # Your API Hash
+channel_id = channel_id  # Replace with your channel chat_id
+
+# Initialize Telegram client
+client = TelegramClient('session_name', api_id, api_hash)
+
+# Function to get market precision for a trading pair
+def get_market_precision(symbol):
+    markets = okx.fetch_markets()
+    for market in markets:
+        if market['symbol'] == symbol:
+            return market['precision']
+    return None
+
+# Function to parse Telegram message format
+def parse_message(text):
+    pattern = r"coin：(\w+)\s*direction：(\w+（accont(\d+(?:\.\d{1,5})?)%SL）)\s*entryprice：(\d+(?:\.\d{1,5})?)-(\d+(?:\.\d{1,5})?)\s*TP：\s*1\)：(\d+(?:\.\d{1,5})?)\s*2\)：(\d+(?:\.\d{1,5})?)\s*3\)：(\d+(?:\.\d{1,5})?)\s*SL：(\d+(?:\.\d{1,5})?)\s*SL_ratio：(\d+(?:\.\d{1,5})?)"
+    match = re.match(pattern, text, re.DOTALL)
+    if match:
+        coin, direction, percenttake, entry_low, entry_high, take_profit1, take_profit2, take_profit3, stop_loss_price, stop_loss_ratio = match.groups()
+        return coin, direction, float(percenttake), float(entry_low), float(entry_high), float(take_profit1), float(take_profit2), float(take_profit3), float(stop_loss_price), float(stop_loss_ratio)
+    return None
+
+# Function to place an order
+def place_order(symbol, entry_price, direction, take_profit1, take_profit2, take_profit3, stop_loss_price, stop_loss_ratio, percenttake):
+    market = symbol + "-USDT-SWAP"  # OKX market symbol format for "BTC-USDT"
+    capital = 1000
+    risk_amount = capital * (percenttake / 100)
+
+    # Calculate position size based on USDT value
+    entry_quantity = (risk_amount * 100 / stop_loss_ratio) / entry_price
+    current_price = okx.fetch_ticker(market)['last']  # Get current market price
+
+    # Order logic based on direction
+    try:
+        if direction.startswith("Short"):  # Short
+            # Limit sell order
+            order = okx.create_order(
+                symbol=market,
+                type='limit',
+                side='sell',
+                amount=entry_quantity,
+                price=entry_price,
+                params={
+                    'post_only': True,
+                    'posSide': 'short'
+                }
+            )
+            print("Limit sell order placed:", order)
+
+            # Take profit orders
+            if take_profit1 < current_price:  # Ensure take profit price is below current market price
+                tp1_order = okx.create_order(
+                    symbol=market,
+                    type='limit',
+                    side='buy',
+                    amount=entry_quantity,
+                    price=take_profit1,
+                    params={
+                        'posSide': 'short',
+                        'stopPrice': take_profit1
+                    }
+                )
+                print("Take profit order 1 placed:", tp1_order)
+            else:
+                print("Take profit price must be lower than current market price")
+
+            # Stop loss order
+            if stop_loss_price > current_price:  # Ensure stop loss price is above current market price
+                stop_loss_order = okx.create_order(
+                    symbol=market,
+                    type='stop',
+                    side='buy',
+                    amount=entry_quantity,
+                    price=stop_loss_price,
+                    params={
+                        'posSide': 'short',
+                        'stopPrice': stop_loss_price
+                    }
+                )
+                print("Stop loss order placed:", stop_loss_order)
+            else:
+                print("Stop loss price must be higher than current market price")
+
+        elif direction.startswith("Long"):  # Long
+            # Limit buy order
+            order = okx.create_order(
+                symbol=market,
+                type='limit',
+                side='buy',
+                amount=entry_quantity,
+                price=entry_price,
+                params={
+                    'post_only': True,
+                    'posSide': 'long'
+                }
+            )
+            print("Limit buy order placed:", order)
+
+            # Take profit orders
+            if take_profit1 > current_price:  # Ensure take profit price is above current market price
+                tp1_order = okx.create_order(
+                    symbol=market,
+                    type='limit',
+                    side='sell',
+                    amount=entry_quantity,
+                    price=take_profit1,
+                    params={
+                        'posSide': 'long',
+                        'stopPrice': take_profit1
+                    }
+                )
+                print("Take profit order 1 placed:", tp1_order)
+            else:
+                print("Take profit price must be higher than current market price")
+
+            # Stop loss order
+            if stop_loss_price < current_price:  # Ensure stop loss price is below current market price
+                stop_loss_order = okx.create_order(
+                    symbol=market,
+                    type='stop',
+                    side='sell',
+                    amount=entry_quantity,
+                    price=stop_loss_price,
+                    params={
+                        'posSide': 'long',
+                        'stopPrice': stop_loss_price
+                    }
+                )
+                print("Stop loss order placed:", stop_loss_order)
+            else:
+                print("Stop loss price must be lower than current market price")
+
+    except Exception as e:
+        print(f"Error placing order: {e}")
+
+# Handle messages received from the Telegram channel
+async def main():
+    async with TelegramClient('session_name', api_id, api_hash) as client:
+        @client.on(events.NewMessage(chats=channel_id))
+        async def handler(event):
+            text = event.message.message
+            trade_info = parse_message(text)
+            if trade_info:
+                coin, direction, percenttake, entry_low, entry_high, take_profit1, take_profit2, take_profit3, stop_loss_price, stop_loss_ratio = trade_info
+                await event.reply(f"coin：{coin}, entryprice：{entry_low}-{entry_high}, direction：{direction}, TP：1) {take_profit1}, TP：2) {take_profit2}, TP：3) {take_profit3}, SL：{stop_loss_price}, SL_ratio：{stop_loss_ratio}")
+                await event.reply("Format is correct")
+                place_order(coin, entry_low, direction, take_profit1, take_profit2, take_profit3, stop_loss_price, stop_loss_ratio, percenttake)
+            else:
+                await event.reply("Format is incorrect, please check and resend")
+
+        await client.start()
+        await client.run_until_disconnected()
+
+# Run the Telegram client and monitor messages
+if __name__ == '__main__':
+    import asyncio
+    asyncio.run(main())
